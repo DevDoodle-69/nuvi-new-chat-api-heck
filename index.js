@@ -12,7 +12,7 @@ app.use(express.json());
 
 const UPSTREAM_URL = 'https://api.heckai.weight-wave.com/api/ha/v1/chat';
 const MEMORY_FILE = path.join(process.cwd(), 'memory.json');
-const MAX_MEMORY_TURNS = 1000;
+const MAX_MEMORY_TURNS = 100;
 const MAX_CONTEXT_LENGTH = 16000;
 const SYSTEM_PROMPT_FILE = path.join(process.cwd(), 'system_prompt.json');
 
@@ -175,102 +175,150 @@ app.get('/chat', async (req, res) => {
 
   const fullContext = memory.truncateContext(history, msg, systemPrompt);
 
-  try {
-    const upstreamResponse = await fetch(UPSTREAM_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream',
-        'Origin': 'https://heck.ai',
-        'Referer': 'https://heck.ai/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0',
-      },
-      body: JSON.stringify({
-        model: model,
-        question: fullContext,
-        language: 'en',
-        sessionId: randomUUID(),
-        deepThink: false
-      }),
-    });
+  let retryCount = 0;
+  const maxRetries = 10;
+  let success = false;
+  let completeResponse = '';
+  let upstreamResponse = null;
 
-    if (!upstreamResponse.ok) {
-      return res.status(502).json({ 
-        error: 'Upstream service unavailable',
-        status: upstreamResponse.status
+  while (retryCount < maxRetries && !success) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      upstreamResponse = await fetch(UPSTREAM_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          'Origin': 'https://heck.ai',
+          'Referer': 'https://heck.ai/',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        },
+        body: JSON.stringify({
+          model: model,
+          question: fullContext,
+          language: 'en',
+          sessionId: randomUUID(),
+          deepThink: false
+        }),
+        signal: controller.signal
       });
-    }
 
-    if (isStreaming) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.flushHeaders();
-    }
+      clearTimeout(timeoutId);
 
-    const reader = upstreamResponse.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let completeResponse = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (value) {
-        buffer += decoder.decode(value, { stream: !done });
+      if (upstreamResponse.status === 429 || upstreamResponse.status === 503 || upstreamResponse.status === 504) {
+        retryCount++;
+        const waitTime = Math.min(1000 * Math.pow(2, retryCount), 30000);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        continue;
       }
 
-      const lines = buffer.split('\n');
-      buffer = done ? '' : (lines.pop() || '');
-
-      for (const line of lines) {
-        if (!line.startsWith('data:')) continue;
-        
-        let token = line.slice(5);
-        if (token.startsWith(' ')) {
-          token = token.slice(1);
+      if (!upstreamResponse.ok) {
+        if (upstreamResponse.status >= 500) {
+          retryCount++;
+          const waitTime = Math.min(1000 * Math.pow(2, retryCount), 30000);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          continue;
         }
-        
-        const trimmedToken = token.trim();
-        const controlTokens = ['[ANSWER_START]', '[ANSWER_DONE]', '[ANSWER_END]', '[RELATE_Q_START]', '[SOURCE_START]', '[SOURCE_DONE]', '[ERROR]', '[REASON_START]', '[REASON_DONE]'];
-        
-        if (controlTokens.includes(trimmedToken)) continue;
-
-        if (trimmedToken === '[RELATE_Q_DONE]' || trimmedToken === '[DONE]') {
-          if (isStreaming) {
-            res.write('data: [DONE]\n\n');
-          }
-          break;
-        }
-
-        if (token) {
-          completeResponse += token;
-          if (isStreaming) {
-            res.write(`data: ${token}\n\n`);
-          }
-        }
+        throw new Error(`Upstream error: ${upstreamResponse.status}`);
       }
 
-      if (done) break;
+      if (isStreaming) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+      }
+
+      const reader = upstreamResponse.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (value) {
+          buffer += decoder.decode(value, { stream: !done });
+        }
+
+        const lines = buffer.split('\n');
+        buffer = done ? '' : (lines.pop() || '');
+
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          
+          let token = line.slice(5);
+          if (token.startsWith(' ')) {
+            token = token.slice(1);
+          }
+          
+          const trimmedToken = token.trim();
+          const controlTokens = ['[ANSWER_START]', '[ANSWER_DONE]', '[ANSWER_END]', '[RELATE_Q_START]', '[SOURCE_START]', '[SOURCE_DONE]', '[ERROR]', '[REASON_START]', '[REASON_DONE]'];
+          
+          if (controlTokens.includes(trimmedToken)) continue;
+
+          if (trimmedToken === '[RELATE_Q_DONE]' || trimmedToken === '[DONE]') {
+            if (isStreaming) {
+              res.write('data: [DONE]\n\n');
+            }
+            break;
+          }
+
+          if (token) {
+            completeResponse += token;
+            if (isStreaming) {
+              res.write(`data: ${token}\n\n`);
+            }
+          }
+        }
+
+        if (done) break;
+      }
+
+      const cleanResponse = completeResponse.split('{"error":')[0].trim();
+
+      const updatedHistory = [...history, { user: msg, ai: cleanResponse }];
+      memory.updateConversation(currentConvoId, updatedHistory);
+
+      success = true;
+
+      if (!isStreaming) {
+        return res.json({
+          convoid: currentConvoId,
+          response: cleanResponse
+        });
+      } else {
+        return res.end();
+      }
+
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        retryCount++;
+        const waitTime = Math.min(1000 * Math.pow(2, retryCount), 30000);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        continue;
+      }
+      
+      if (retryCount >= maxRetries - 1) {
+        if (!res.headersSent) {
+          return res.status(500).json({ 
+            error: 'Service temporarily unavailable, please try again later'
+          });
+        }
+      }
+      retryCount++;
+      const waitTime = Math.min(1000 * Math.pow(2, retryCount), 30000);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
     }
+  }
 
-    const cleanResponse = completeResponse.split('{"error":')[0].trim();
-
-    const updatedHistory = [...history, { user: msg, ai: cleanResponse }];
-    memory.updateConversation(currentConvoId, updatedHistory);
-
-    if (!isStreaming) {
-      return res.json({
-        convoid: currentConvoId,
-        response: cleanResponse
-      });
-    } else {
-      res.end();
-    }
-
-  } catch (error) {
+  if (!success) {
     if (!res.headersSent) {
-      res.status(500).json({ 
-        error: 'Internal server error'
+      return res.status(500).json({ 
+        error: 'Service temporarily unavailable, please try again later'
       });
     }
   }
