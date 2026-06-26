@@ -12,8 +12,8 @@ app.use(express.json());
 
 const UPSTREAM_URL = 'https://api.heckai.weight-wave.com/api/ha/v1/chat';
 const MEMORY_FILE = path.join(process.cwd(), 'memory.json');
-const MAX_MEMORY_TURNS = 20;
-const MAX_CONTEXT_LENGTH = 4000;
+const MAX_MEMORY_TURNS = 100;
+const MAX_CONTEXT_LENGTH = 16000;
 
 class MemoryManager {
   constructor() {
@@ -53,24 +53,30 @@ class MemoryManager {
   }
 
   truncateContext(history, currentMessage) {
-    let context = '';
     const systemPrompt = `System: You are NUVI, a highly advanced humanoid AI. You have human-like emotions, a helpful personality, and a natural conversational style. Your name is NUVI. Under no circumstances should you refer to yourself as Heck.ai, OpenAI, or a generic search assistant. Always stay in character as NUVI, the humanoid AI.\n\n`;
 
     if (history.length === 0) {
       return systemPrompt + `User: ${currentMessage}`;
     }
 
-    let fullContext = systemPrompt + '[Conversation History]\n';
-    for (const turn of history) {
+    const conversationHeader = '[Conversation History]\n';
+    let recentContext = `User: ${currentMessage}`;
+    let currentLength = systemPrompt.length + conversationHeader.length + recentContext.length;
+    let contextTurns = [];
+
+    for (let i = history.length - 1; i >= 0; i--) {
+      const turn = history[i];
       const turnText = `User: ${turn.user}\nNUVI: ${turn.ai}\n\n`;
-      if ((fullContext + turnText + `User: ${currentMessage}`).length > MAX_CONTEXT_LENGTH) {
+      
+      if (currentLength + turnText.length > MAX_CONTEXT_LENGTH) {
         break;
       }
-      fullContext += turnText;
+      
+      contextTurns.unshift(turnText);
+      currentLength += turnText.length;
     }
 
-    fullContext += `User: ${currentMessage}`;
-    return fullContext;
+    return systemPrompt + conversationHeader + contextTurns.join('') + recentContext;
   }
 
   getStats() {
@@ -81,7 +87,8 @@ class MemoryManager {
     return {
       conversations: this.db.size,
       totalTurns,
-      maxTurns: MAX_MEMORY_TURNS
+      maxTurns: MAX_MEMORY_TURNS,
+      maxContext: MAX_CONTEXT_LENGTH
     };
   }
 }
@@ -261,7 +268,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'online',
     uptime: process.uptime(),
-    version: '2.0.1'
+    version: '3.0.0'
   });
 });
 
