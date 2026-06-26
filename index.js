@@ -54,7 +54,7 @@ class MemoryManager {
 
   truncateContext(history, currentMessage) {
     let context = '';
-    const systemPrompt = `[System: You are NUVI, a human-like AI. Respond casually, briefly, and naturally. Avoid robotic lists or disclaimers.]\n\n`;
+    const systemPrompt = `System: You are NUVI, a highly advanced humanoid AI. You have human-like emotions, a helpful personality, and a natural conversational style. Your name is NUVI. Under no circumstances should you refer to yourself as Heck.ai, OpenAI, or a generic search assistant. Always stay in character as NUVI, the humanoid AI.\n\n`;
 
     if (history.length === 0) {
       return systemPrompt + `User: ${currentMessage}`;
@@ -93,7 +93,7 @@ app.get('/', (req, res) => {
     api_name: "NUVI API",
     status: "Operational",
     instructions: {
-      description: "Send requests to the /chat endpoint to interact with the model.",
+      description: "Send requests to the /chat endpoint to interact with NUVI.",
       method: "GET",
       endpoint: "/chat",
       required_parameters: ["msg"],
@@ -166,14 +166,19 @@ app.get('/chat', async (req, res) => {
       buffer = done ? '' : (lines.pop() || '');
 
       for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
+        if (!line.startsWith('data:')) continue;
         
-        const token = line.slice(6).trim();
+        let token = line.slice(5);
+        if (token.startsWith(' ')) {
+          token = token.slice(1);
+        }
+        
+        const trimmedToken = token.trim();
         const controlTokens = ['[ANSWER_START]', '[ANSWER_DONE]', '[ANSWER_END]', '[RELATE_Q_START]', '[SOURCE_START]', '[SOURCE_DONE]', '[ERROR]', '[REASON_START]', '[REASON_DONE]'];
         
-        if (controlTokens.includes(token)) continue;
+        if (controlTokens.includes(trimmedToken)) continue;
 
-        if (token === '[RELATE_Q_DONE]' || token === '[DONE]') {
+        if (trimmedToken === '[RELATE_Q_DONE]' || trimmedToken === '[DONE]') {
           if (isStreaming) {
             res.write('data: [DONE]\n\n');
           }
@@ -256,7 +261,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'online',
     uptime: process.uptime(),
-    version: '2.0.0'
+    version: '2.0.1'
   });
 });
 
