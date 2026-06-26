@@ -16,6 +16,9 @@ const MAX_MEMORY_TURNS = 100;
 const MAX_CONTEXT_LENGTH = 16000;
 const SYSTEM_PROMPT_FILE = path.join(process.cwd(), 'system_prompt.json');
 
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const generateRandomIP = () => `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
+
 class MemoryManager {
   constructor() {
     this.db = new Map();
@@ -175,17 +178,11 @@ app.get('/chat', async (req, res) => {
 
   const fullContext = memory.truncateContext(history, msg, systemPrompt);
 
-  let retryCount = 0;
-  const maxRetries = 10;
-  let success = false;
-  let completeResponse = '';
-  let upstreamResponse = null;
-
-  while (retryCount < maxRetries && !success) {
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000);
-
+  try {
+    let upstreamResponse;
+    let retries = 3;
+    
+    while (retries > 0) {
       upstreamResponse = await fetch(UPSTREAM_URL, {
         method: 'POST',
         headers: {
@@ -193,9 +190,9 @@ app.get('/chat', async (req, res) => {
           'Accept': 'text/event-stream',
           'Origin': 'https://heck.ai',
           'Referer': 'https://heck.ai/',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0',
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'X-Forwarded-For': generateRandomIP(),
+          'X-Real-IP': generateRandomIP()
         },
         body: JSON.stringify({
           model: model,
@@ -204,121 +201,95 @@ app.get('/chat', async (req, res) => {
           sessionId: randomUUID(),
           deepThink: false
         }),
-        signal: controller.signal
       });
 
-      clearTimeout(timeoutId);
-
-      if (upstreamResponse.status === 429 || upstreamResponse.status === 503 || upstreamResponse.status === 504) {
-        retryCount++;
-        const waitTime = Math.min(1000 * Math.pow(2, retryCount), 30000);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-        continue;
-      }
-
-      if (!upstreamResponse.ok) {
-        if (upstreamResponse.status >= 500) {
-          retryCount++;
-          const waitTime = Math.min(1000 * Math.pow(2, retryCount), 30000);
-          await new Promise(resolve => setTimeout(resolve, waitTime));
+      if (upstreamResponse.status === 429) {
+        retries--;
+        if (retries > 0) {
+          await delay(2000);
           continue;
         }
-        throw new Error(`Upstream error: ${upstreamResponse.status}`);
       }
-
-      if (isStreaming) {
-        res.setHeader('Content-Type', 'text/event-stream');
-        res.setHeader('Cache-Control', 'no-cache, no-transform');
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no');
-        res.flushHeaders();
-      }
-
-      const reader = upstreamResponse.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (value) {
-          buffer += decoder.decode(value, { stream: !done });
-        }
-
-        const lines = buffer.split('\n');
-        buffer = done ? '' : (lines.pop() || '');
-
-        for (const line of lines) {
-          if (!line.startsWith('data:')) continue;
-          
-          let token = line.slice(5);
-          if (token.startsWith(' ')) {
-            token = token.slice(1);
-          }
-          
-          const trimmedToken = token.trim();
-          const controlTokens = ['[ANSWER_START]', '[ANSWER_DONE]', '[ANSWER_END]', '[RELATE_Q_START]', '[SOURCE_START]', '[SOURCE_DONE]', '[ERROR]', '[REASON_START]', '[REASON_DONE]'];
-          
-          if (controlTokens.includes(trimmedToken)) continue;
-
-          if (trimmedToken === '[RELATE_Q_DONE]' || trimmedToken === '[DONE]') {
-            if (isStreaming) {
-              res.write('data: [DONE]\n\n');
-            }
-            break;
-          }
-
-          if (token) {
-            completeResponse += token;
-            if (isStreaming) {
-              res.write(`data: ${token}\n\n`);
-            }
-          }
-        }
-
-        if (done) break;
-      }
-
-      const cleanResponse = completeResponse.split('{"error":')[0].trim();
-
-      const updatedHistory = [...history, { user: msg, ai: cleanResponse }];
-      memory.updateConversation(currentConvoId, updatedHistory);
-
-      success = true;
-
-      if (!isStreaming) {
-        return res.json({
-          convoid: currentConvoId,
-          response: cleanResponse
-        });
-      } else {
-        return res.end();
-      }
-
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        retryCount++;
-        const waitTime = Math.min(1000 * Math.pow(2, retryCount), 30000);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-        continue;
-      }
-      
-      if (retryCount >= maxRetries - 1) {
-        if (!res.headersSent) {
-          return res.status(500).json({ 
-            error: 'Service temporarily unavailable, please try again later'
-          });
-        }
-      }
-      retryCount++;
-      const waitTime = Math.min(1000 * Math.pow(2, retryCount), 30000);
-      await new Promise(resolve => setTimeout(resolve, waitTime));
+      break;
     }
-  }
 
-  if (!success) {
+    if (!upstreamResponse.ok) {
+      return res.status(502).json({ 
+        error: 'Upstream service blocked the request',
+        status: upstreamResponse.status
+      });
+    }
+
+    if (isStreaming) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders();
+    }
+
+    const reader = upstreamResponse.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let completeResponse = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (value) {
+        buffer += decoder.decode(value, { stream: !done });
+      }
+
+      const lines = buffer.split('\n');
+      buffer = done ? '' : (lines.pop() || '');
+
+      for (const line of lines) {
+        if (!line.startsWith('data:')) continue;
+        
+        let token = line.slice(5);
+        if (token.startsWith(' ')) {
+          token = token.slice(1);
+        }
+        
+        const trimmedToken = token.trim();
+        const controlTokens = ['[ANSWER_START]', '[ANSWER_DONE]', '[ANSWER_END]', '[RELATE_Q_START]', '[SOURCE_START]', '[SOURCE_DONE]', '[ERROR]', '[REASON_START]', '[REASON_DONE]'];
+        
+        if (controlTokens.includes(trimmedToken)) continue;
+
+        if (trimmedToken === '[RELATE_Q_DONE]' || trimmedToken === '[DONE]') {
+          if (isStreaming) {
+            res.write('data: [DONE]\n\n');
+          }
+          break;
+        }
+
+        if (token) {
+          completeResponse += token;
+          if (isStreaming) {
+            res.write(`data: ${token}\n\n`);
+          }
+        }
+      }
+
+      if (done) break;
+    }
+
+    const cleanResponse = completeResponse.split('{"error":')[0].trim();
+
+    const updatedHistory = [...history, { user: msg, ai: cleanResponse }];
+    memory.updateConversation(currentConvoId, updatedHistory);
+
+    if (!isStreaming) {
+      return res.json({
+        convoid: currentConvoId,
+        response: cleanResponse
+      });
+    } else {
+      res.end();
+    }
+
+  } catch (error) {
     if (!res.headersSent) {
-      return res.status(500).json({ 
-        error: 'Service temporarily unavailable, please try again later'
+      res.status(500).json({ 
+        error: 'Internal server error'
       });
     }
   }
@@ -444,7 +415,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'online',
     uptime: process.uptime(),
-    version: '4.0.0'
+    version: '4.1.0'
   });
 });
 
