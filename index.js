@@ -10,11 +10,10 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-const OPENROUTER_API_KEY = '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';
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const XAI_API_KEY = 'xai-gkLBM5O7rEbRbFylNpzvsoSmOVJfpo9zItXb4zWjZ5XSdPL1lUEsdxsGmUJrj9rHBQf0AjT0ngamxFWY';
+const XAI_URL = 'https://api.x.ai/v1/responses';
 const MEMORY_FILE = path.join(process.cwd(), 'memory.json');
 const MAX_MEMORY_TURNS = 200;
-const MAX_CONTEXT_LENGTH = 32000;
 const SYSTEM_PROMPT_FILE = path.join(process.cwd(), 'system_prompt.json');
 
 class MemoryManager {
@@ -89,35 +88,22 @@ class MemoryManager {
     this.saveSystemPrompts();
   }
 
-  buildMessages(history, currentMessage, systemPromptOverride = null) {
-    const messages = [];
+  buildInput(history, currentMessage, systemPromptOverride = null) {
+    let input = '';
     
-    let systemPrompt = systemPromptOverride || this.getSystemPrompt('default') || 'You are a helpful, intelligent, and knowledgeable AI assistant. You provide accurate, detailed, and thoughtful responses. You are capable of deep reasoning and maintain context throughout conversations.';
+    let systemPrompt = systemPromptOverride || this.getSystemPrompt('default') || 'You are NUVI, a highly advanced humanoid AI with human-like emotions, a helpful personality, and a natural conversational style. You are capable of deep reasoning and maintain context throughout conversations.';
     
-    messages.push({
-      role: 'system',
-      content: systemPrompt
-    });
-
+    input += `System: ${systemPrompt}\n\n`;
+    
     const recentHistory = history.slice(-MAX_MEMORY_TURNS);
     
     for (const turn of recentHistory) {
-      messages.push({
-        role: 'user',
-        content: turn.user
-      });
-      messages.push({
-        role: 'assistant',
-        content: turn.ai
-      });
+      input += `User: ${turn.user}\nAssistant: ${turn.ai}\n\n`;
     }
-
-    messages.push({
-      role: 'user',
-      content: currentMessage
-    });
-
-    return messages;
+    
+    input += `User: ${currentMessage}\nAssistant:`;
+    
+    return input;
   }
 
   getStats() {
@@ -129,7 +115,6 @@ class MemoryManager {
       conversations: this.db.size,
       totalTurns,
       maxTurns: MAX_MEMORY_TURNS,
-      maxContext: MAX_CONTEXT_LENGTH,
       systemPrompts: this.systemPrompts.size
     };
   }
@@ -141,20 +126,13 @@ app.get('/', (req, res) => {
   res.json({
     api_name: "NUVI AI API",
     status: "Operational",
-    version: "5.0.0",
-    instructions: {
-      description: "Send requests to the /chat endpoint to interact with NUVI using OpenRouter.",
-      method: "GET or POST",
-      endpoint: "/chat",
-      required_parameters: ["msg"],
-      optional_parameters: ["convoid", "stream", "model", "system", "temperature", "max_tokens"],
-      example_usage: "/chat?msg=hello&convoid=1234&model=openai/gpt-4o&stream=false"
-    }
+    version: "6.0.0",
+    provider: "xAI Grok"
   });
 });
 
 app.get('/chat', async (req, res) => {
-  const { msg, convoid, stream = 'false', model = 'openai/gpt-4o', system, temperature = '0.8', max_tokens = '2000' } = req.query;
+  const { msg, convoid, stream = 'true', system } = req.query;
 
   if (!msg) {
     return res.status(400).json({ 
@@ -179,7 +157,7 @@ app.get('/chat', async (req, res) => {
     }
   }
 
-  const messages = memory.buildMessages(history, msg, systemPrompt);
+  const input = memory.buildInput(history, msg, systemPrompt);
 
   let retryCount = 0;
   const maxRetries = 5;
@@ -190,33 +168,28 @@ app.get('/chat', async (req, res) => {
   while (retryCount < maxRetries && !success) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
 
       const requestBody = {
-        model: model,
-        messages: messages,
-        temperature: parseFloat(temperature),
-        max_tokens: parseInt(max_tokens),
+        model: 'grok-4.20-0309-non-reasoning',
+        instructions: systemPrompt || 'You are NUVI, a highly advanced humanoid AI with human-like emotions, a helpful personality, and a natural conversational style. You are capable of deep reasoning and maintain context throughout conversations.',
+        max_output_tokens: 1000000,
+        frequency_penalty: -2,
+        text: {
+          format: {
+            type: 'json_object'
+          }
+        },
         stream: isStreaming,
-        top_p: 0.9,
-        frequency_penalty: 0.3,
-        presence_penalty: 0.3
+        input: input
       };
 
-      const headers = {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://heck.ai',
-        'X-Title': 'NUVI AI Assistant'
-      };
-
-      if (isStreaming) {
-        headers['Accept'] = 'text/event-stream';
-      }
-
-      upstreamResponse = await fetch(OPENROUTER_URL, {
+      upstreamResponse = await fetch(XAI_URL, {
         method: 'POST',
-        headers: headers,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${XAI_API_KEY}`
+        },
         body: JSON.stringify(requestBody),
         signal: controller.signal
       });
@@ -270,8 +243,8 @@ app.get('/chat', async (req, res) => {
               }
               try {
                 const parsed = JSON.parse(data);
-                if (parsed.choices && parsed.choices[0] && parsed.choices[0].delta && parsed.choices[0].delta.content) {
-                  const token = parsed.choices[0].delta.content;
+                if (parsed.output && parsed.output.text) {
+                  const token = parsed.output.text;
                   completeResponse += token;
                   res.write(`data: ${JSON.stringify({ token })}\n\n`);
                 }
@@ -289,10 +262,10 @@ app.get('/chat', async (req, res) => {
         return res.end();
       } else {
         const responseData = await upstreamResponse.json();
-        if (responseData.choices && responseData.choices[0] && responseData.choices[0].message) {
-          completeResponse = responseData.choices[0].message.content;
+        if (responseData.output && responseData.output.text) {
+          completeResponse = responseData.output.text;
         } else {
-          throw new Error('Invalid response format from OpenRouter');
+          throw new Error('Invalid response format from xAI');
         }
 
         const cleanResponse = completeResponse.trim();
@@ -303,9 +276,7 @@ app.get('/chat', async (req, res) => {
 
         return res.json({
           convoid: currentConvoId,
-          response: cleanResponse,
-          model: model,
-          tokens: responseData.usage || null
+          response: cleanResponse
         });
       }
 
@@ -341,7 +312,7 @@ app.get('/chat', async (req, res) => {
 });
 
 app.post('/chat', async (req, res) => {
-  const { msg, convoid, stream = false, model = 'openai/gpt-4o', system, temperature = 0.8, max_tokens = 2000 } = req.body;
+  const { msg, convoid, stream = true, system } = req.body;
 
   if (!msg) {
     return res.status(400).json({ 
@@ -352,11 +323,8 @@ app.post('/chat', async (req, res) => {
         body: {
           msg: 'your_message',
           convoid: 'optional_conversation_id',
-          stream: false,
-          model: 'openai/gpt-4o',
-          system: 'optional_system_prompt',
-          temperature: 0.8,
-          max_tokens: 2000
+          stream: true,
+          system: 'optional_system_prompt'
         }
       }
     });
@@ -377,7 +345,7 @@ app.post('/chat', async (req, res) => {
     }
   }
 
-  const messages = memory.buildMessages(history, msg, systemPrompt);
+  const input = memory.buildInput(history, msg, systemPrompt);
 
   let retryCount = 0;
   const maxRetries = 5;
@@ -388,33 +356,28 @@ app.post('/chat', async (req, res) => {
   while (retryCount < maxRetries && !success) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
 
       const requestBody = {
-        model: model,
-        messages: messages,
-        temperature: temperature,
-        max_tokens: max_tokens,
+        model: 'grok-4.20-0309-non-reasoning',
+        instructions: systemPrompt || 'You are NUVI, a highly advanced humanoid AI with human-like emotions, a helpful personality, and a natural conversational style. You are capable of deep reasoning and maintain context throughout conversations.',
+        max_output_tokens: 1000000,
+        frequency_penalty: -2,
+        text: {
+          format: {
+            type: 'json_object'
+          }
+        },
         stream: isStreaming,
-        top_p: 0.9,
-        frequency_penalty: 0.3,
-        presence_penalty: 0.3
+        input: input
       };
 
-      const headers = {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://heck.ai',
-        'X-Title': 'NUVI AI Assistant'
-      };
-
-      if (isStreaming) {
-        headers['Accept'] = 'text/event-stream';
-      }
-
-      upstreamResponse = await fetch(OPENROUTER_URL, {
+      upstreamResponse = await fetch(XAI_URL, {
         method: 'POST',
-        headers: headers,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${XAI_API_KEY}`
+        },
         body: JSON.stringify(requestBody),
         signal: controller.signal
       });
@@ -468,8 +431,8 @@ app.post('/chat', async (req, res) => {
               }
               try {
                 const parsed = JSON.parse(data);
-                if (parsed.choices && parsed.choices[0] && parsed.choices[0].delta && parsed.choices[0].delta.content) {
-                  const token = parsed.choices[0].delta.content;
+                if (parsed.output && parsed.output.text) {
+                  const token = parsed.output.text;
                   completeResponse += token;
                   res.write(`data: ${JSON.stringify({ token })}\n\n`);
                 }
@@ -487,10 +450,10 @@ app.post('/chat', async (req, res) => {
         return res.end();
       } else {
         const responseData = await upstreamResponse.json();
-        if (responseData.choices && responseData.choices[0] && responseData.choices[0].message) {
-          completeResponse = responseData.choices[0].message.content;
+        if (responseData.output && responseData.output.text) {
+          completeResponse = responseData.output.text;
         } else {
-          throw new Error('Invalid response format from OpenRouter');
+          throw new Error('Invalid response format from xAI');
         }
 
         const cleanResponse = completeResponse.trim();
@@ -501,9 +464,7 @@ app.post('/chat', async (req, res) => {
 
         return res.json({
           convoid: currentConvoId,
-          response: cleanResponse,
-          model: model,
-          tokens: responseData.usage || null
+          response: cleanResponse
         });
       }
 
@@ -654,34 +615,16 @@ app.delete('/system', (req, res) => {
   return res.status(404).json({ error: 'No system prompt found for this conversation' });
 });
 
-app.get('/models', async (req, res) => {
-  try {
-    const response = await fetch('https://openrouter.ai/api/v1/models', {
-      headers: {
-        'Authorization': `Bearer ${OPENROUTER_API_KEY}`
-      }
-    });
-    const data = await response.json();
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch models' });
-  }
-});
-
 app.get('/health', (req, res) => {
   res.json({
     status: 'online',
     uptime: process.uptime(),
-    version: '5.0.0',
-    provider: 'OpenRouter',
-    memory: {
-      conversations: memory.db.size,
-      systemPrompts: memory.systemPrompts.size
-    }
+    version: '6.0.0',
+    provider: 'xAI Grok'
   });
 });
 
 app.listen(PORT, () => {
   console.log(`NUVI AI API running on port ${PORT}`);
-  console.log(`Using OpenRouter API with model: openai/gpt-4o`);
+  console.log(`Using xAI Grok API`);
 });
