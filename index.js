@@ -29,20 +29,15 @@ class MemoryManager {
         Object.entries(parsed).forEach(([key, value]) => {
           this.db.set(key, value);
         });
-        console.log(`Loaded ${this.db.size} conversations from disk`);
       }
-    } catch (error) {
-      console.error('Failed to load memory from disk:', error);
-    }
+    } catch (error) {}
   }
 
   saveToDisk() {
     try {
       const data = Object.fromEntries(this.db);
       fs.writeFileSync(MEMORY_FILE, JSON.stringify(data, null, 2));
-    } catch (error) {
-      console.error('Failed to save memory to disk:', error);
-    }
+    } catch (error) {}
   }
 
   getConversation(convoid) {
@@ -93,13 +88,28 @@ class MemoryManager {
 
 const memory = new MemoryManager();
 
+app.get('/', (req, res) => {
+  res.json({
+    api_name: "NUVI API",
+    status: "Operational",
+    instructions: {
+      description: "Send requests to the /chat endpoint to interact with the model.",
+      method: "GET",
+      endpoint: "/chat",
+      required_parameters: ["msg"],
+      optional_parameters: ["convoid", "stream", "model"],
+      example_usage: "/chat?msg=hello&convoid=1234&stream=false"
+    }
+  });
+});
+
 app.get('/chat', async (req, res) => {
   const { msg, convoid, stream = 'false', model = 'openai/gpt-5.4-mini' } = req.query;
 
   if (!msg) {
     return res.status(400).json({ 
       error: 'Missing required parameter: msg',
-      usage: '/chat?msg=hello&convoid=optional&stream=true/false&model=optional'
+      usage: '/chat?msg=your_message'
     });
   }
 
@@ -130,8 +140,7 @@ app.get('/chat', async (req, res) => {
     if (!upstreamResponse.ok) {
       return res.status(502).json({ 
         error: 'Upstream service unavailable',
-        status: upstreamResponse.status,
-        statusText: upstreamResponse.statusText
+        status: upstreamResponse.status
       });
     }
 
@@ -182,28 +191,24 @@ app.get('/chat', async (req, res) => {
       if (done) break;
     }
 
-    const updatedHistory = [...history, { user: msg, ai: completeResponse }];
+    const cleanResponse = completeResponse.split('{"error":')[0].trim();
+
+    const updatedHistory = [...history, { user: msg, ai: cleanResponse }];
     memory.updateConversation(currentConvoId, updatedHistory);
 
     if (!isStreaming) {
       return res.json({
         convoid: currentConvoId,
-        response: completeResponse,
-        memory: {
-          conversationTurns: updatedHistory.length,
-          maxTurns: MAX_MEMORY_TURNS
-        }
+        response: cleanResponse
       });
     } else {
       res.end();
     }
 
   } catch (error) {
-    console.error('Proxy Error:', error);
     if (!res.headersSent) {
       res.status(500).json({ 
-        error: 'Internal server error',
-        details: error.message 
+        error: 'Internal server error'
       });
     }
   }
@@ -226,8 +231,7 @@ app.get('/memory', (req, res) => {
   
   res.json({
     stats,
-    recentConversations: conversations,
-    memoryFile: MEMORY_FILE
+    recentConversations: conversations
   });
 });
 
@@ -238,28 +242,24 @@ app.delete('/memory', (req, res) => {
     if (memory.db.has(convoid)) {
       memory.db.delete(convoid);
       memory.saveToDisk();
-      return res.json({ success: true, message: `Deleted conversation: ${convoid}` });
+      return res.json({ success: true });
     }
     return res.status(404).json({ error: 'Conversation not found' });
   }
 
   memory.db.clear();
   memory.saveToDisk();
-  res.json({ success: true, message: 'All memory cleared' });
+  res.json({ success: true });
 });
 
 app.get('/health', (req, res) => {
-  const stats = memory.getStats();
   res.json({
     status: 'online',
     uptime: process.uptime(),
-    memory: stats,
     version: '2.0.0'
   });
 });
 
 app.listen(PORT, () => {
   console.log(`NUVI API running on port ${PORT}`);
-  console.log(`Memory file: ${MEMORY_FILE}`);
-  console.log(`Max turns per conversation: ${MAX_MEMORY_TURNS}`);
 });
