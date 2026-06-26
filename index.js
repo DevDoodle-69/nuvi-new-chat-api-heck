@@ -12,7 +12,7 @@ app.use(express.json());
 
 const UPSTREAM_URL = 'https://api.heckai.weight-wave.com/api/ha/v1/chat';
 const MEMORY_FILE = path.join(process.cwd(), 'memory.json');
-const MAX_MEMORY_TURNS = 100;
+const MAX_MEMORY_TURNS = 1000;
 const MAX_CONTEXT_LENGTH = 16000;
 const SYSTEM_PROMPT_FILE = path.join(process.cwd(), 'system_prompt.json');
 
