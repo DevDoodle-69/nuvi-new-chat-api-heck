@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 
 const GEMINI_API_KEY = 'AQ.Ab8RN6LyGOxxDFKnkxUso0J-uQTUTJ-vIZ9yxlaE-9Wym2gk7A';
-const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent';
+const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const MEMORY_FILE = path.join(process.cwd(), 'memory.json');
 const MAX_MEMORY_TURNS = 200;
 const SYSTEM_PROMPT_FILE = path.join(process.cwd(), 'system_prompt.json');
@@ -88,35 +88,22 @@ class MemoryManager {
     this.saveSystemPrompts();
   }
 
-  buildContents(history, currentMessage, systemPromptOverride = null) {
-    const contents = [];
+  buildInput(history, currentMessage, systemPromptOverride = null) {
+    let input = '';
     
     let systemPrompt = systemPromptOverride || this.getSystemPrompt('default') || 'You are NUVI, a highly advanced humanoid AI with human-like emotions, a helpful personality, and a natural conversational style. You are capable of deep reasoning and maintain context throughout conversations. Always respond as NUVI.';
     
-    contents.push({
-      role: 'user',
-      parts: [{ text: `System: ${systemPrompt}` }]
-    });
+    input += `System: ${systemPrompt}\n\n`;
     
     const recentHistory = history.slice(-MAX_MEMORY_TURNS);
     
     for (const turn of recentHistory) {
-      contents.push({
-        role: 'user',
-        parts: [{ text: turn.user }]
-      });
-      contents.push({
-        role: 'model',
-        parts: [{ text: turn.ai }]
-      });
+      input += `User: ${turn.user}\nAssistant: ${turn.ai}\n\n`;
     }
-
-    contents.push({
-      role: 'user',
-      parts: [{ text: currentMessage }]
-    });
-
-    return contents;
+    
+    input += `User: ${currentMessage}\nAssistant:`;
+    
+    return input;
   }
 
   getStats() {
@@ -139,8 +126,8 @@ app.get('/', (req, res) => {
   res.json({
     api_name: "NUVI AI API",
     status: "Operational",
-    version: "7.0.0",
-    provider: "Google Gemini"
+    version: "8.0.0",
+    provider: "Google Gemini 3 Flash"
   });
 });
 
@@ -169,7 +156,7 @@ app.get('/chat', async (req, res) => {
     }
   }
 
-  const contents = memory.buildContents(history, msg, systemPrompt);
+  const input = memory.buildInput(history, msg, systemPrompt);
 
   let retryCount = 0;
   const maxRetries = 5;
@@ -179,34 +166,22 @@ app.get('/chat', async (req, res) => {
   while (retryCount < maxRetries && !success) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
 
       const requestBody = {
-        contents: contents,
-        generationConfig: {
-          temperature: 0.8,
-          topK: 40,
-          topP: 0.95,
-          maxOutputTokens: 8192,
-        },
-        safetySettings: [
+        model: "models/gemini-3-flash-preview",
+        input: input,
+        tools: [
           {
-            category: "HARM_CATEGORY_HARASSMENT",
-            threshold: "BLOCK_MEDIUM_AND_ABOVE"
-          },
-          {
-            category: "HARM_CATEGORY_HATE_SPEECH",
-            threshold: "BLOCK_MEDIUM_AND_ABOVE"
-          },
-          {
-            category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-            threshold: "BLOCK_MEDIUM_AND_ABOVE"
-          },
-          {
-            category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-            threshold: "BLOCK_MEDIUM_AND_ABOVE"
+            type: "google_search"
           }
-        ]
+        ],
+        generation_config: {
+          temperature: 1,
+          max_output_tokens: 65536,
+          top_p: 0.95,
+          thinking_level: "high"
+        }
       };
 
       const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
@@ -240,10 +215,14 @@ app.get('/chat', async (req, res) => {
 
       const data = await response.json();
       
-      if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0]) {
-        completeResponse = data.candidates[0].content.parts[0].text;
+      if (data.output) {
+        completeResponse = data.output;
+      } else if (data.candidates && data.candidates[0] && data.candidates[0].output) {
+        completeResponse = data.candidates[0].output;
+      } else if (data.response) {
+        completeResponse = data.response;
       } else {
-        throw new Error('Invalid response format from Gemini');
+        completeResponse = JSON.stringify(data);
       }
 
       const cleanResponse = completeResponse.trim();
@@ -255,7 +234,7 @@ app.get('/chat', async (req, res) => {
       return res.json({
         convoid: currentConvoId,
         response: cleanResponse,
-        model: 'gemini-2.0-flash-exp'
+        model: 'gemini-3-flash-preview'
       });
 
     } catch (error) {
@@ -317,7 +296,7 @@ app.post('/chat', async (req, res) => {
     }
   }
 
-  const contents = memory.buildContents(history, msg, systemPrompt);
+  const input = memory.buildInput(history, msg, systemPrompt);
 
   let retryCount = 0;
   const maxRetries = 5;
@@ -327,34 +306,22 @@ app.post('/chat', async (req, res) => {
   while (retryCount < maxRetries && !success) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
 
       const requestBody = {
-        contents: contents,
-        generationConfig: {
-          temperature: 0.8,
-          topK: 40,
-          topP: 0.95,
-          maxOutputTokens: 8192,
-        },
-        safetySettings: [
+        model: "models/gemini-3-flash-preview",
+        input: input,
+        tools: [
           {
-            category: "HARM_CATEGORY_HARASSMENT",
-            threshold: "BLOCK_MEDIUM_AND_ABOVE"
-          },
-          {
-            category: "HARM_CATEGORY_HATE_SPEECH",
-            threshold: "BLOCK_MEDIUM_AND_ABOVE"
-          },
-          {
-            category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-            threshold: "BLOCK_MEDIUM_AND_ABOVE"
-          },
-          {
-            category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-            threshold: "BLOCK_MEDIUM_AND_ABOVE"
+            type: "google_search"
           }
-        ]
+        ],
+        generation_config: {
+          temperature: 1,
+          max_output_tokens: 65536,
+          top_p: 0.95,
+          thinking_level: "high"
+        }
       };
 
       const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
@@ -388,10 +355,14 @@ app.post('/chat', async (req, res) => {
 
       const data = await response.json();
       
-      if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0]) {
-        completeResponse = data.candidates[0].content.parts[0].text;
+      if (data.output) {
+        completeResponse = data.output;
+      } else if (data.candidates && data.candidates[0] && data.candidates[0].output) {
+        completeResponse = data.candidates[0].output;
+      } else if (data.response) {
+        completeResponse = data.response;
       } else {
-        throw new Error('Invalid response format from Gemini');
+        completeResponse = JSON.stringify(data);
       }
 
       const cleanResponse = completeResponse.trim();
@@ -403,7 +374,7 @@ app.post('/chat', async (req, res) => {
       return res.json({
         convoid: currentConvoId,
         response: cleanResponse,
-        model: 'gemini-2.0-flash-exp'
+        model: 'gemini-3-flash-preview'
       });
 
     } catch (error) {
@@ -553,13 +524,13 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'online',
     uptime: process.uptime(),
-    version: '7.0.0',
-    provider: 'Google Gemini',
-    model: 'gemini-2.0-flash-exp'
+    version: '8.0.0',
+    provider: 'Google Gemini 3 Flash',
+    model: 'gemini-3-flash-preview'
   });
 });
 
 app.listen(PORT, () => {
   console.log(`NUVI AI API running on port ${PORT}`);
-  console.log(`Using Google Gemini 2.0 Flash Exp`);
+  console.log(`Using Google Gemini 3 Flash Preview`);
 });
