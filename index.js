@@ -6,8 +6,11 @@ import path from 'path';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Note: Ensure your API key starts with "AIza..." (Google AI Studio keys). 
+// If your key is an OAuth token or from another service, it may throw errors.
 const API_KEY = 'AQ.Ab8RN6LyGOxxDFKnkxUso0J-uQTUTJ-vIZ9yxlaE-9Wym2gk7A';
-const MODEL = 'gemini-1.5-flash';
+const MODEL = 'gemini-1.5-flash-latest';
 
 app.use(cors());
 app.use(express.json());
@@ -162,6 +165,4 @@ app.all('/chat', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`NUVI API running on port ${PORT} with Gemini 1.5 Flash`);
-});
+app.listen(PORT, () => {});
