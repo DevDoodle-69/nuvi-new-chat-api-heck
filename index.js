@@ -10,14 +10,12 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-const UPSTREAM_URL = 'https://api.heckai.weight-wave.com/api/ha/v1/chat';
+const OPENROUTER_API_KEY = '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';
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const MEMORY_FILE = path.join(process.cwd(), 'memory.json');
-const MAX_MEMORY_TURNS = 100;
-const MAX_CONTEXT_LENGTH = 16000;
+const MAX_MEMORY_TURNS = 200;
+const MAX_CONTEXT_LENGTH = 32000;
 const SYSTEM_PROMPT_FILE = path.join(process.cwd(), 'system_prompt.json');
-
-const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-const generateRandomIP = () => `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
 
 class MemoryManager {
   constructor() {
@@ -91,31 +89,35 @@ class MemoryManager {
     this.saveSystemPrompts();
   }
 
-  truncateContext(history, currentMessage, systemPromptOverride = null) {
-    let systemPrompt = systemPromptOverride || this.getSystemPrompt('default') || `System: You are NUVI, a highly advanced humanoid AI. You have human-like emotions, a helpful personality, and a natural conversational style. Your name is NUVI. Under no circumstances should you refer to yourself as Heck.ai, OpenAI, or a generic search assistant. Always stay in character as NUVI, the humanoid AI.\n\n`;
+  buildMessages(history, currentMessage, systemPromptOverride = null) {
+    const messages = [];
+    
+    let systemPrompt = systemPromptOverride || this.getSystemPrompt('default') || 'You are a helpful, intelligent, and knowledgeable AI assistant. You provide accurate, detailed, and thoughtful responses. You are capable of deep reasoning and maintain context throughout conversations.';
+    
+    messages.push({
+      role: 'system',
+      content: systemPrompt
+    });
 
-    if (history.length === 0) {
-      return systemPrompt + `User: ${currentMessage}`;
+    const recentHistory = history.slice(-MAX_MEMORY_TURNS);
+    
+    for (const turn of recentHistory) {
+      messages.push({
+        role: 'user',
+        content: turn.user
+      });
+      messages.push({
+        role: 'assistant',
+        content: turn.ai
+      });
     }
 
-    const conversationHeader = '[Conversation History]\n';
-    let recentContext = `User: ${currentMessage}`;
-    let currentLength = systemPrompt.length + conversationHeader.length + recentContext.length;
-    let contextTurns = [];
+    messages.push({
+      role: 'user',
+      content: currentMessage
+    });
 
-    for (let i = history.length - 1; i >= 0; i--) {
-      const turn = history[i];
-      const turnText = `User: ${turn.user}\nNUVI: ${turn.ai}\n\n`;
-      
-      if (currentLength + turnText.length > MAX_CONTEXT_LENGTH) {
-        break;
-      }
-      
-      contextTurns.unshift(turnText);
-      currentLength += turnText.length;
-    }
-
-    return systemPrompt + conversationHeader + contextTurns.join('') + recentContext;
+    return messages;
   }
 
   getStats() {
@@ -137,21 +139,22 @@ const memory = new MemoryManager();
 
 app.get('/', (req, res) => {
   res.json({
-    api_name: "NUVI API",
+    api_name: "NUVI AI API",
     status: "Operational",
+    version: "5.0.0",
     instructions: {
-      description: "Send requests to the /chat endpoint to interact with NUVI.",
-      method: "GET",
+      description: "Send requests to the /chat endpoint to interact with NUVI using OpenRouter.",
+      method: "GET or POST",
       endpoint: "/chat",
       required_parameters: ["msg"],
-      optional_parameters: ["convoid", "stream", "model", "system"],
-      example_usage: "/chat?msg=hello&convoid=1234&stream=false&system=You%20are%20a%20helpful%20assistant"
+      optional_parameters: ["convoid", "stream", "model", "system", "temperature", "max_tokens"],
+      example_usage: "/chat?msg=hello&convoid=1234&model=openai/gpt-4o&stream=false"
     }
   });
 });
 
 app.get('/chat', async (req, res) => {
-  const { msg, convoid, stream = 'false', model = 'openai/gpt-5.4-mini', system } = req.query;
+  const { msg, convoid, stream = 'false', model = 'openai/gpt-4o', system, temperature = '0.8', max_tokens = '2000' } = req.query;
 
   if (!msg) {
     return res.status(400).json({ 
@@ -168,128 +171,368 @@ app.get('/chat', async (req, res) => {
   if (system) {
     const decodedSystem = decodeURIComponent(system);
     memory.setSystemPrompt(currentConvoId, decodedSystem);
-    systemPrompt = `System: ${decodedSystem}\n\n`;
+    systemPrompt = decodedSystem;
   } else {
     const existingPrompt = memory.getSystemPrompt(currentConvoId);
     if (existingPrompt) {
-      systemPrompt = `System: ${existingPrompt}\n\n`;
+      systemPrompt = existingPrompt;
     }
   }
 
-  const fullContext = memory.truncateContext(history, msg, systemPrompt);
+  const messages = memory.buildMessages(history, msg, systemPrompt);
 
-  try {
-    let upstreamResponse;
-    let retries = 3;
-    
-    while (retries > 0) {
-      upstreamResponse = await fetch(UPSTREAM_URL, {
+  let retryCount = 0;
+  const maxRetries = 5;
+  let success = false;
+  let completeResponse = '';
+  let upstreamResponse = null;
+
+  while (retryCount < maxRetries && !success) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+      const requestBody = {
+        model: model,
+        messages: messages,
+        temperature: parseFloat(temperature),
+        max_tokens: parseInt(max_tokens),
+        stream: isStreaming,
+        top_p: 0.9,
+        frequency_penalty: 0.3,
+        presence_penalty: 0.3
+      };
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': 'https://heck.ai',
+        'X-Title': 'NUVI AI Assistant'
+      };
+
+      if (isStreaming) {
+        headers['Accept'] = 'text/event-stream';
+      }
+
+      upstreamResponse = await fetch(OPENROUTER_URL, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'text/event-stream',
-          'Origin': 'https://heck.ai',
-          'Referer': 'https://heck.ai/',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'X-Forwarded-For': generateRandomIP(),
-          'X-Real-IP': generateRandomIP()
-        },
-        body: JSON.stringify({
-          model: model,
-          question: fullContext,
-          language: 'en',
-          sessionId: randomUUID(),
-          deepThink: false
-        }),
+        headers: headers,
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
       });
 
-      if (upstreamResponse.status === 429) {
-        retries--;
-        if (retries > 0) {
-          await delay(2000);
+      clearTimeout(timeoutId);
+
+      if (upstreamResponse.status === 429 || upstreamResponse.status === 503 || upstreamResponse.status === 504) {
+        retryCount++;
+        const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        continue;
+      }
+
+      if (!upstreamResponse.ok) {
+        if (upstreamResponse.status >= 500) {
+          retryCount++;
+          const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
           continue;
         }
-      }
-      break;
-    }
-
-    if (!upstreamResponse.ok) {
-      return res.status(502).json({ 
-        error: 'Upstream service blocked the request',
-        status: upstreamResponse.status
-      });
-    }
-
-    if (isStreaming) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.flushHeaders();
-    }
-
-    const reader = upstreamResponse.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let completeResponse = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (value) {
-        buffer += decoder.decode(value, { stream: !done });
+        const errorText = await upstreamResponse.text();
+        throw new Error(`Upstream error: ${upstreamResponse.status} - ${errorText}`);
       }
 
-      const lines = buffer.split('\n');
-      buffer = done ? '' : (lines.pop() || '');
+      if (isStreaming) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
 
-      for (const line of lines) {
-        if (!line.startsWith('data:')) continue;
-        
-        let token = line.slice(5);
-        if (token.startsWith(' ')) {
-          token = token.slice(1);
-        }
-        
-        const trimmedToken = token.trim();
-        const controlTokens = ['[ANSWER_START]', '[ANSWER_DONE]', '[ANSWER_END]', '[RELATE_Q_START]', '[SOURCE_START]', '[SOURCE_DONE]', '[ERROR]', '[REASON_START]', '[REASON_DONE]'];
-        
-        if (controlTokens.includes(trimmedToken)) continue;
+        const reader = upstreamResponse.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-        if (trimmedToken === '[RELATE_Q_DONE]' || trimmedToken === '[DONE]') {
-          if (isStreaming) {
-            res.write('data: [DONE]\n\n');
+        while (true) {
+          const { done, value } = await reader.read();
+          if (value) {
+            buffer += decoder.decode(value, { stream: !done });
           }
-          break;
+
+          const lines = buffer.split('\n');
+          buffer = done ? '' : (lines.pop() || '');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6).trim();
+              if (data === '[DONE]') {
+                res.write('data: [DONE]\n\n');
+                break;
+              }
+              try {
+                const parsed = JSON.parse(data);
+                if (parsed.choices && parsed.choices[0] && parsed.choices[0].delta && parsed.choices[0].delta.content) {
+                  const token = parsed.choices[0].delta.content;
+                  completeResponse += token;
+                  res.write(`data: ${JSON.stringify({ token })}\n\n`);
+                }
+              } catch (e) {}
+            }
+          }
+
+          if (done) break;
         }
 
-        if (token) {
-          completeResponse += token;
-          if (isStreaming) {
-            res.write(`data: ${token}\n\n`);
-          }
+        const cleanResponse = completeResponse.trim();
+        const updatedHistory = [...history, { user: msg, ai: cleanResponse }];
+        memory.updateConversation(currentConvoId, updatedHistory);
+
+        return res.end();
+      } else {
+        const responseData = await upstreamResponse.json();
+        if (responseData.choices && responseData.choices[0] && responseData.choices[0].message) {
+          completeResponse = responseData.choices[0].message.content;
+        } else {
+          throw new Error('Invalid response format from OpenRouter');
         }
+
+        const cleanResponse = completeResponse.trim();
+        const updatedHistory = [...history, { user: msg, ai: cleanResponse }];
+        memory.updateConversation(currentConvoId, updatedHistory);
+
+        success = true;
+
+        return res.json({
+          convoid: currentConvoId,
+          response: cleanResponse,
+          model: model,
+          tokens: responseData.usage || null
+        });
       }
 
-      if (done) break;
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        retryCount++;
+        const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        continue;
+      }
+      
+      if (retryCount >= maxRetries - 1) {
+        if (!res.headersSent) {
+          return res.status(500).json({ 
+            error: 'Service temporarily unavailable, please try again later',
+            details: error.message
+          });
+        }
+      }
+      retryCount++;
+      const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
     }
+  }
 
-    const cleanResponse = completeResponse.split('{"error":')[0].trim();
-
-    const updatedHistory = [...history, { user: msg, ai: cleanResponse }];
-    memory.updateConversation(currentConvoId, updatedHistory);
-
-    if (!isStreaming) {
-      return res.json({
-        convoid: currentConvoId,
-        response: cleanResponse
-      });
-    } else {
-      res.end();
-    }
-
-  } catch (error) {
+  if (!success) {
     if (!res.headersSent) {
-      res.status(500).json({ 
-        error: 'Internal server error'
+      return res.status(500).json({ 
+        error: 'Service temporarily unavailable, please try again later'
+      });
+    }
+  }
+});
+
+app.post('/chat', async (req, res) => {
+  const { msg, convoid, stream = false, model = 'openai/gpt-4o', system, temperature = 0.8, max_tokens = 2000 } = req.body;
+
+  if (!msg) {
+    return res.status(400).json({ 
+      error: 'Missing required parameter: msg',
+      usage: {
+        method: 'POST',
+        endpoint: '/chat',
+        body: {
+          msg: 'your_message',
+          convoid: 'optional_conversation_id',
+          stream: false,
+          model: 'openai/gpt-4o',
+          system: 'optional_system_prompt',
+          temperature: 0.8,
+          max_tokens: 2000
+        }
+      }
+    });
+  }
+
+  const currentConvoId = convoid || randomUUID();
+  const isStreaming = stream;
+  const history = memory.getConversation(currentConvoId);
+  
+  let systemPrompt = null;
+  if (system) {
+    memory.setSystemPrompt(currentConvoId, system);
+    systemPrompt = system;
+  } else {
+    const existingPrompt = memory.getSystemPrompt(currentConvoId);
+    if (existingPrompt) {
+      systemPrompt = existingPrompt;
+    }
+  }
+
+  const messages = memory.buildMessages(history, msg, systemPrompt);
+
+  let retryCount = 0;
+  const maxRetries = 5;
+  let success = false;
+  let completeResponse = '';
+  let upstreamResponse = null;
+
+  while (retryCount < maxRetries && !success) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+      const requestBody = {
+        model: model,
+        messages: messages,
+        temperature: temperature,
+        max_tokens: max_tokens,
+        stream: isStreaming,
+        top_p: 0.9,
+        frequency_penalty: 0.3,
+        presence_penalty: 0.3
+      };
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'HTTP-Referer': 'https://heck.ai',
+        'X-Title': 'NUVI AI Assistant'
+      };
+
+      if (isStreaming) {
+        headers['Accept'] = 'text/event-stream';
+      }
+
+      upstreamResponse = await fetch(OPENROUTER_URL, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (upstreamResponse.status === 429 || upstreamResponse.status === 503 || upstreamResponse.status === 504) {
+        retryCount++;
+        const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        continue;
+      }
+
+      if (!upstreamResponse.ok) {
+        if (upstreamResponse.status >= 500) {
+          retryCount++;
+          const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          continue;
+        }
+        const errorText = await upstreamResponse.text();
+        throw new Error(`Upstream error: ${upstreamResponse.status} - ${errorText}`);
+      }
+
+      if (isStreaming) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+
+        const reader = upstreamResponse.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (value) {
+            buffer += decoder.decode(value, { stream: !done });
+          }
+
+          const lines = buffer.split('\n');
+          buffer = done ? '' : (lines.pop() || '');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const data = line.slice(6).trim();
+              if (data === '[DONE]') {
+                res.write('data: [DONE]\n\n');
+                break;
+              }
+              try {
+                const parsed = JSON.parse(data);
+                if (parsed.choices && parsed.choices[0] && parsed.choices[0].delta && parsed.choices[0].delta.content) {
+                  const token = parsed.choices[0].delta.content;
+                  completeResponse += token;
+                  res.write(`data: ${JSON.stringify({ token })}\n\n`);
+                }
+              } catch (e) {}
+            }
+          }
+
+          if (done) break;
+        }
+
+        const cleanResponse = completeResponse.trim();
+        const updatedHistory = [...history, { user: msg, ai: cleanResponse }];
+        memory.updateConversation(currentConvoId, updatedHistory);
+
+        return res.end();
+      } else {
+        const responseData = await upstreamResponse.json();
+        if (responseData.choices && responseData.choices[0] && responseData.choices[0].message) {
+          completeResponse = responseData.choices[0].message.content;
+        } else {
+          throw new Error('Invalid response format from OpenRouter');
+        }
+
+        const cleanResponse = completeResponse.trim();
+        const updatedHistory = [...history, { user: msg, ai: cleanResponse }];
+        memory.updateConversation(currentConvoId, updatedHistory);
+
+        success = true;
+
+        return res.json({
+          convoid: currentConvoId,
+          response: cleanResponse,
+          model: model,
+          tokens: responseData.usage || null
+        });
+      }
+
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        retryCount++;
+        const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        continue;
+      }
+      
+      if (retryCount >= maxRetries - 1) {
+        if (!res.headersSent) {
+          return res.status(500).json({ 
+            error: 'Service temporarily unavailable, please try again later',
+            details: error.message
+          });
+        }
+      }
+      retryCount++;
+      const waitTime = Math.min(2000 * Math.pow(2, retryCount), 30000);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+  }
+
+  if (!success) {
+    if (!res.headersSent) {
+      return res.status(500).json({ 
+        error: 'Service temporarily unavailable, please try again later'
       });
     }
   }
@@ -411,14 +654,34 @@ app.delete('/system', (req, res) => {
   return res.status(404).json({ error: 'No system prompt found for this conversation' });
 });
 
+app.get('/models', async (req, res) => {
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/models', {
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`
+      }
+    });
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch models' });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'online',
     uptime: process.uptime(),
-    version: '4.1.0'
+    version: '5.0.0',
+    provider: 'OpenRouter',
+    memory: {
+      conversations: memory.db.size,
+      systemPrompts: memory.systemPrompts.size
+    }
   });
 });
 
 app.listen(PORT, () => {
-  console.log(`NUVI API running on port ${PORT}`);
+  console.log(`NUVI AI API running on port ${PORT}`);
+  console.log(`Using OpenRouter API with model: openai/gpt-4o`);
 });
