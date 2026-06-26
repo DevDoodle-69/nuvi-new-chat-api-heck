@@ -6,11 +6,8 @@ import path from 'path';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-// Note: Ensure your API key starts with "AIza..." (Google AI Studio keys). 
-// If your key is an OAuth token or from another service, it may throw errors.
 const API_KEY = 'AQ.Ab8RN6LyGOxxDFKnkxUso0J-uQTUTJ-vIZ9yxlaE-9Wym2gk7A';
-const MODEL = 'gemini-1.5-flash-latest';
+const MODEL = 'gemini-pro';
 
 app.use(cors());
 app.use(express.json());
@@ -70,20 +67,25 @@ app.all('/chat', async (req, res) => {
   }
 
   const history = memory.getConversation(convoid);
-  const contents = history.map(turn => ({
-    role: turn.role,
-    parts: [{ text: turn.content }]
-  }));
-  
-  contents.push({
-    role: 'user',
-    parts: [{ text: msg }]
-  });
+  let contents = [];
+
+  if (history.length === 0) {
+    contents.push({
+      role: 'user',
+      parts: [{ text: `System Instruction: ${system}\n\nUser Message: ${msg}` }]
+    });
+  } else {
+    contents = history.map(turn => ({
+      role: turn.role,
+      parts: [{ text: turn.content }]
+    }));
+    contents.push({
+      role: 'user',
+      parts: [{ text: msg }]
+    });
+  }
 
   const payload = {
-    systemInstruction: {
-      parts: [{ text: system }]
-    },
     contents: contents,
     generationConfig: {
       maxOutputTokens: 8192,
@@ -134,7 +136,11 @@ app.all('/chat', async (req, res) => {
         }
       }
       
-      memory.updateConversation(convoid, [...history, { role: 'user', content: msg }, { role: 'model', content: fullAiResponse }]);
+      memory.updateConversation(convoid, [
+        ...history, 
+        { role: 'user', content: history.length === 0 ? `System Instruction: ${system}\n\nUser Message: ${msg}` : msg }, 
+        { role: 'model', content: fullAiResponse }
+      ]);
       res.end();
 
     } else {
@@ -153,7 +159,11 @@ app.all('/chat', async (req, res) => {
       const data = await response.json();
       const aiResponseText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-      memory.updateConversation(convoid, [...history, { role: 'user', content: msg }, { role: 'model', content: aiResponseText }]);
+      memory.updateConversation(convoid, [
+        ...history, 
+        { role: 'user', content: history.length === 0 ? `System Instruction: ${system}\n\nUser Message: ${msg}` : msg }, 
+        { role: 'model', content: aiResponseText }
+      ]);
 
       res.json({
         convoid,
