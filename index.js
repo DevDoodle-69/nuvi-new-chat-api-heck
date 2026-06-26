@@ -52,8 +52,10 @@ class MemoryManager {
     this.saveToDisk();
   }
 
-  truncateContext(history, currentMessage) {
-    const systemPrompt = `System: You are NUVI, a highly advanced humanoid AI. You have human-like emotions, a helpful personality, and a natural conversational style. Your name is NUVI. Under no circumstances should you refer to yourself as Heck.ai, OpenAI, or a generic search assistant. Always stay in character as NUVI, the humanoid AI.\n\n`;
+  truncateContext(history, currentMessage, customSystemPrompt) {
+    const defaultSystemPrompt = `System: You are NUVI, a highly advanced humanoid AI. You have human-like emotions, a helpful personality, and a natural conversational style. Your name is NUVI. Under no circumstances should you refer to yourself as Heck.ai, OpenAI, or a generic search assistant. Always stay in character as NUVI, the humanoid AI.\n\n`;
+    
+    const systemPrompt = customSystemPrompt ? `System: ${customSystemPrompt}\n\n` : defaultSystemPrompt;
 
     if (history.length === 0) {
       return systemPrompt + `User: ${currentMessage}`;
@@ -66,7 +68,7 @@ class MemoryManager {
 
     for (let i = history.length - 1; i >= 0; i--) {
       const turn = history[i];
-      const turnText = `User: ${turn.user}\nNUVI: ${turn.ai}\n\n`;
+      const turnText = `User: ${turn.user}\nAI: ${turn.ai}\n\n`;
       
       if (currentLength + turnText.length > MAX_CONTEXT_LENGTH) {
         break;
@@ -100,18 +102,18 @@ app.get('/', (req, res) => {
     api_name: "NUVI API",
     status: "Operational",
     instructions: {
-      description: "Send requests to the /chat endpoint to interact with NUVI.",
+      description: "Send requests to the /chat endpoint to interact with the AI.",
       method: "GET",
       endpoint: "/chat",
       required_parameters: ["msg"],
-      optional_parameters: ["convoid", "stream", "model"],
-      example_usage: "/chat?msg=hello&convoid=1234&stream=false"
+      optional_parameters: ["convoid", "stream", "model", "system"],
+      example_usage: "/chat?msg=hello&convoid=1234&stream=false&system=You are a helpful coding assistant"
     }
   });
 });
 
 app.get('/chat', async (req, res) => {
-  const { msg, convoid, stream = 'false', model = 'openai/gpt-5.4-mini' } = req.query;
+  const { msg, convoid, stream = 'false', model = 'openai/gpt-5.4-mini', system } = req.query;
 
   if (!msg) {
     return res.status(400).json({ 
@@ -123,7 +125,7 @@ app.get('/chat', async (req, res) => {
   const currentConvoId = convoid || randomUUID();
   const isStreaming = stream.toLowerCase() === 'true';
   const history = memory.getConversation(currentConvoId);
-  const fullContext = memory.truncateContext(history, msg);
+  const fullContext = memory.truncateContext(history, msg, system);
 
   try {
     const upstreamResponse = await fetch(UPSTREAM_URL, {
@@ -268,7 +270,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'online',
     uptime: process.uptime(),
-    version: '3.0.0'
+    version: '4.0.0'
   });
 });
 
